@@ -98,6 +98,334 @@ static uint16* WorkRAMH = (uint16*)(WorkRAM + (WORKRAM_BANK_SIZE_BYTES*1));
 static uint8 BackupRAM[32768];
 static bool BackupRAM_Dirty;
 static int64 BackupRAM_SaveDelay;
+
+// Shared global event counter, incremented by RE4 and RE5 below (each on its
+// own separate slot index) so their independently-sized ring buffers can
+// still be interleaved back into one chronological order in Python -- needed
+// to tell which matrix-workspace write (RE5) immediately precedes which
+// section-1 call (RE4).
+uint32 RE_GlobalSeq;
+
+// --- VF2 reverse-engineering instrumentation: trace CPU writes into the known
+// (stable, confirmed via DMALevel->StartReadAddr) VDP1-command staging buffer
+// in High Work RAM, to find the actual code that computes projected vertices
+// (as opposed to the later DMA flush to VDP1, which is not CPU-instruction-driven).
+// Now watching the shared per-vertex-cache table (r12 base, found while tracing
+// the VDP1 record-gather loop) instead of the VDP1 staging buffer.
+// Widened after discovering a SECOND character's output table at
+// 0x060966b0 (0x800 bytes before the originally-observed one) that the
+// narrower range silently missed -- see docs/re/README.md Finding 3's
+// "two-table" note.
+enum : uint32 { RE2_STAGING_LO = 0x06096eb0 - 0x2000, RE2_STAGING_HI = 0x06096eb0 + 0x8000 };
+enum : unsigned { RE2_TRACE_SIZE = 8192 };
+uint32 RE2_TracePC[RE2_TRACE_SIZE];
+uint32 RE2_TracePR[RE2_TRACE_SIZE];
+uint32 RE2_TraceAddr[RE2_TRACE_SIZE];
+uint32 RE2_TraceVal[RE2_TRACE_SIZE];
+uint32 RE2_TraceR[RE2_TRACE_SIZE][16];
+uint32 RE2_TraceSeq[RE2_TRACE_SIZE];  // RE_GlobalSeq at the time of this write
+uint8 RE2_TraceCore[RE2_TRACE_SIZE];  // 0 = master, 1 = slave -- see RE3_TraceCore's comment.
+                                       // Needed because "nearest write at or after this hit's
+                                       // own seq", the pattern this project uses everywhere to
+                                       // pair RE2 writes against RE3 hits, silently picks up the
+                                       // OTHER core's own, unrelated, sooner write when both
+                                       // cores are concurrently writing screen positions
+                                       // (disassembly_evidence.s Sec 15) -- confirmed live via a
+                                       // consistent seq-delta signature (the wrong core's match
+                                       // has delta 1-3, the correct same-core one always 5).
+uint32 RE2_TraceCount;
+
+// --- Trap on a specific PC (right before the suspected matrix-multiply dot
+// product sequence) to capture live registers AND the matrix/vertex content
+// at that exact point (not just pointers — r14's target may be a reused
+// scratch slot overwritten later in the same frame, so memory read *after*
+// the fact would give the wrong, final-bone-only matrix for earlier hits).
+enum : uint32 { RE3_TARGET_PC = 0x060288b6 };
+enum : unsigned { RE3_TRACE_SIZE = 8192 };
+uint32 RE3_TraceR[RE3_TRACE_SIZE][16];
+uint32 RE3_TraceMatrix[RE3_TRACE_SIZE][24];  // words at R[6]-48 .. R[6]+44, step 4 -- the extra
+                                              // 4 words (+32..+44) beyond the original +28 cover
+                                              // the disassembly's own "true rowA"/"bias0" position
+                                              // (see disassembly_evidence.s Sec 10): R[6] here is
+                                              // captured BEFORE the loop's own `add #32,r6` has
+                                              // taken effect (a timing quirk of this direct-memory-
+                                              // read hook, confirmed empirically), so every other
+                                              // established word-offset in this file is 32 bytes
+                                              // higher than this R[6] would suggest at first glance
+uint32 RE3_TraceVertex[RE3_TRACE_SIZE][5];
+uint32 RE3_TraceSeq[RE3_TRACE_SIZE];  // RE_GlobalSeq at the time of this vertex hit
+uint8 RE3_TraceCore[RE3_TRACE_SIZE];  // 0 = master (CPU[0]), 1 = slave -- RE3 is deliberately
+                                       // unguarded (merges both cores), so anyone pairing another
+                                       // trap's entries 1:1 against RE3 hits needs this to avoid
+                                       // silently mispairing across cores when both are busy (see
+                                       // disassembly_evidence.s Sec 10/12)
+uint32 RE3_TraceCount;
+
+// --- Trap once per *call* into section 1's vertex-transform subroutine
+// (docs/re/README.md's "Open problem" next step), not once per vertex like
+// RE3: fires at the function's very first instruction, 0x060288a6, before
+// any of section 1's own code has run, so R4/R6/PR are still exactly the
+// caller's values (r13 is NOT read here -- live-register timing at this
+// trap point turned out not to reflect `0x060288aa`'s load yet, so the
+// vertex count is instead read directly out of memory at R4+4, the same
+// address `mov.l @(4,r4),r13` would load from, which is unaffected by
+// pipeline timing). Lets us find, across a whole frame, every call site
+// that ever passes a nonzero vertex count (the one already-known call site
+// via vtable[40] -> bridge -> 0x06028700 was proven in
+// disassembly_evidence.s section 7 to always pass zero).
+enum : uint32 { RE4_TARGET_PC = 0x060288a6 };
+enum : unsigned { RE4_TRACE_SIZE = 8192 };
+uint32 RE4_TracePR[RE4_TRACE_SIZE];
+uint32 RE4_TraceR4[RE4_TRACE_SIZE];
+uint32 RE4_TraceR6[RE4_TRACE_SIZE];
+uint32 RE4_TraceVertCount[RE4_TRACE_SIZE];  // memory read at R4+4, not the R13 register
+uint32 RE4_TraceSeq[RE4_TRACE_SIZE];        // RE_GlobalSeq at the time of this call
+uint8 RE4_TraceCore[RE4_TRACE_SIZE];        // 0 = master, 1 = slave -- see RE3_TraceCore's comment.
+                                             // Unguarded (widened from its original CPU[0]-only
+                                             // guard, and TRACE_SIZE doubled) so this can serve as
+                                             // the authoritative per-call boundary for EVERY call,
+                                             // not just master-core ones -- needed because a matrix
+                                             // can legitimately be reused for two back-to-back,
+                                             // genuinely separate calls (disassembly_evidence.s
+                                             // Sec 14), which group_by_matrix's own matrix-identity
+                                             // check alone cannot tell apart from one continuous call.
+uint32 RE4_TraceCount;
+
+// --- Trap on CPU writes into the confirmed "current matrix" workspace
+// (0x06051d00, the exact address section 6/7 confirmed GBR+28 points at
+// during real vertex-transform calls) to find whatever code composes it --
+// i.e. the real mesh-rendering translate/rotate hierarchy, as opposed to
+// section 2's bone loop (disassembly_evidence.s section 7: proven to
+// compose a DIFFERENT, non-rendering set of matrices that never reach
+// section 1). Watches all 48 bytes (rowA/rowB/rowC + 3 biases, 12 words).
+enum : uint32 { RE5_MATRIX_LO = 0x06051d00, RE5_MATRIX_HI = 0x06051d00 + 48 };
+enum : unsigned { RE5_TRACE_SIZE = 8192 };
+uint32 RE5_TracePC[RE5_TRACE_SIZE];
+uint32 RE5_TracePR[RE5_TRACE_SIZE];
+uint32 RE5_TraceAddr[RE5_TRACE_SIZE];
+uint32 RE5_TraceVal[RE5_TRACE_SIZE];
+uint32 RE5_TraceSeq[RE5_TRACE_SIZE];  // RE_GlobalSeq at the time of this write
+uint32 RE5_TraceCount;
+
+// --- Trap once per bone iteration of the confirmed OLD_BONE_LOOP
+// (disassembly_evidence.s sections 2 and 8), at PC 0x0602c962 (the `jsr`
+// into vtable[48]/slTranslate itself) to read R4/R5/R6 = tx/ty/tz, already
+// loaded by the game's own `mov.l @r0+,r4/r5/r6` a few instructions
+// earlier. An initial attempt trapping right at those loads (PC ==
+// 0x0602c95a, only 1 instruction after `r0` was finalized) got the SAME
+// bone's data (index 0) on every iteration regardless of R12 -- the same
+// register-pipeline-timing issue RE4 hit with R13 (see RE4's comment
+// above): a register written only 1 instruction before the trap PC is not
+// yet visible, but by 2+ instructions later it reliably is (confirmed by
+// RE3's own comment on 0x060288b6). Trapping 2+ instructions after each of
+// r4/r5/r6's own loads avoids needing a memory read entirely here. Also
+// captures R12 (the loop's bone counter, unmodified at this point:
+// 7,6,5,4,3,2,1 across the 7 iterations, so bone_index = R12-1 matches the
+// game's own computation).
+enum : uint32 { RE6_TARGET_PC = 0x0602c962 };
+enum : unsigned { RE6_TRACE_SIZE = 4096 };
+uint32 RE6_TraceSeq[RE6_TRACE_SIZE];
+uint32 RE6_TraceR12[RE6_TRACE_SIZE];
+uint32 RE6_TraceTx[RE6_TRACE_SIZE];
+uint32 RE6_TraceTy[RE6_TRACE_SIZE];
+uint32 RE6_TraceTz[RE6_TRACE_SIZE];
+uint32 RE6_TraceCount;
+
+// --- Trap once per bone iteration, at PC 0x0602c946 (the loop-body branch
+// target, reached BEFORE this iteration's own `slPushMatrix` -- see
+// section 2's listing) to read the shared PARENT-level rowB/rowC straight
+// out of the confirmed matrix workspace. Each sibling's own push/pop is
+// balanced, so reading here gives the shared parent frame that
+// each bone's own local translation (RE6) must be rotated into before it
+// can be compared to real depth, since slTranslate(tx,ty,tz) composes in
+// the PARENT's frame, before this bone's own slRotX/Y/Z is applied on top.
+enum : uint32 { RE7_TARGET_PC = 0x0602c946 };
+enum : unsigned { RE7_TRACE_SIZE = 4096 };
+uint32 RE7_TraceSeq[RE7_TRACE_SIZE];
+uint32 RE7_TraceRowB[RE7_TRACE_SIZE][3];
+uint32 RE7_TraceRowC[RE7_TRACE_SIZE][3];
+uint32 RE7_TraceCount;
+
+// --- Trap once per iteration of NEW_DIRECT_CALLSITE's own draw-list loop
+// (disassembly_evidence.s section 8, the SGL-vtable-driven loop at
+// 0x06017e88 feeding the second confirmed call site into section 1). Fires
+// at PC 0x06017e98, 2+ instructions after `r0 = *r9 + r8` (the per-object
+// pointer) was finalized at 0x06017e92 -- reads memory at r0+36 and r0+44
+// directly (not the r2/r4 registers the game loads them into 1-2
+// instructions later, for the same register-pipeline-timing reason RE4/RE6
+// needed a memory read or a wider margin) to test whether these two
+// visibility-cull fields are an independent, already-correct depth/extent
+// value rather than something derived from the same broken rowA pipeline.
+enum : uint32 { RE8_TARGET_PC = 0x06017e98 };
+enum : unsigned { RE8_TRACE_SIZE = 4096 };
+uint32 RE8_TraceSeq[RE8_TRACE_SIZE];
+uint32 RE8_TraceObj36[RE8_TRACE_SIZE];
+uint32 RE8_TraceObj44[RE8_TRACE_SIZE];
+uint32 RE8_TraceR0[RE8_TRACE_SIZE];    // the bounding-record address itself (r8+w0), for further offline inspection
+// The "object" the clip test reads out of is NOT a simple bounding box:
+// direct memory dump (live, r0..r0+63) shows a 9-word ~unit-magnitude
+// block at +0..+32 (a rotation matrix) followed by a 3-word translation
+// at +36/+40/+44 with large values (e.g. -746.8, 293.5, -292.9) -- the
+// clip test (0x06017e94-0x06017ea4) only reads +36 and +44, skipping the
+// MIDDLE component +40 entirely, which is exactly what a viewport X/Y
+// frustum check would do while leaving Z untested. +40 is therefore the
+// leading candidate for a genuine, independent depth value.
+uint32 RE8_TraceObj40[RE8_TRACE_SIZE];
+uint32 RE8_TraceCount;
+
+// SECONDARY_SLOT (disassembly_evidence.s section 6/11): R8 at 0x0602e0c6
+// (right where its own [+12,+16,+20] triple gets read and scaled into
+// rowB) is loaded from a recursion-depth-indexed table at the SAME slot
+// that also later yields the node-array-walk pointer -- i.e. R8 itself is
+// (at least very close to) the current 44-byte scene-graph node record.
+// Dumping the full 44 bytes (11 words) around it, across many sibling
+// nodes, is meant to find whether a genuine per-node POSITION field lives
+// somewhere in this record other than +12/+16/+20 (confirmed to be a
+// rotation-row source, not a translation).
+// 0x0602e0c6 itself (the delay-slot target right after the vtable[60]
+// return) is never observed by FetchIF()'s trap check -- confirmed via
+// RE10's whole-function range trace, which shows the fetched-PC sequence
+// jumping directly from 0x602e0c4 to 0x602e0c8, skipping exactly one
+// 2-byte instruction, consistently. An emulator-internal branch-target
+// fetch-path quirk (game logic is unaffected; R8 is untouched by the
+// skipped `mov.l @(12,r8),r4`), not a game bug -- retarget 2 bytes later.
+enum : uint32 { RE9_TARGET_PC = 0x0602e0c8 };
+enum : unsigned { RE9_TRACE_SIZE = 4096 };
+uint32 RE9_TraceSeq[RE9_TRACE_SIZE];
+uint32 RE9_TraceR8[RE9_TRACE_SIZE];
+uint32 RE9_TraceDump[RE9_TRACE_SIZE][11];
+uint32 RE9_TraceCount;
+
+// RE9 (single PC, right after SECONDARY_SLOT's vtable[60] call) never
+// fired despite RE5 showing writes whose PR was that exact address this
+// same frame -- meaning our understanding of the actual live control flow
+// through this function is wrong somewhere. Log every fetch in the whole
+// function's PC range instead of guessing one more single point.
+enum : uint32 { RE10_LO = 0x0602e090, RE10_HI = 0x0602e120 };
+enum : unsigned { RE10_TRACE_SIZE = 16384 };
+uint32 RE10_TracePC[RE10_TRACE_SIZE];
+uint32 RE10_TraceSeq[RE10_TRACE_SIZE];
+uint32 RE10_TraceCount;
+
+// --- Section 1's perspective-divide LUT lookup (disassembly_evidence.s
+// Sec 10, now confirmed correct end-to-end). Dumps the whole register file
+// (same convention RE3 already uses) at both LUT dereference points, so
+// the address and both fetched coefficients can be checked directly:
+//   RE11 @ 0x06028912 (3 instruction-fetches after 0x0602890c's mov.l
+//     @(0,r0),r3 -- LUT[idx][0]'s load).
+//   RE12 @ 0x0602891a (3 instruction-fetches after 0x06028916's mov.l
+//     @(4,r0),r3 -- LUT[idx][1]'s load, which overwrites r3 again).
+// RE_GlobalSeq lets each pair be matched back to its own RE3 vertex hit.
+enum : uint32 { RE11_TARGET_PC = 0x06028912 };
+enum : unsigned { RE11_TRACE_SIZE = 8192 };
+uint32 RE11_TraceSeq[RE11_TRACE_SIZE];
+uint32 RE11_TraceR[RE11_TRACE_SIZE][16];
+uint32 RE11_TraceCount;
+
+enum : uint32 { RE12_TARGET_PC = 0x0602891a };
+enum : unsigned { RE12_TRACE_SIZE = 8192 };
+uint32 RE12_TraceSeq[RE12_TRACE_SIZE];
+uint32 RE12_TraceR[RE12_TRACE_SIZE][16];
+uint32 RE12_TraceCount;
+
+// --- Every fetch across the WHOLE per-vertex loop (0x060288a6-0x06028928)
+// with the full register file, cycle by cycle -- lets register evolution
+// be checked against the static listing instruction-by-instruction. A
+// ring buffer (`% TRACE_SIZE`, same convention as RE2/RE3/RE10) sized to
+// comfortably outlast one whole frame's calls into this loop (a real frame
+// can exceed 1000), and deliberately UNGUARDED (no `this == &CPU[0]`,
+// unlike RE4/RE6/RE7/RE8/RE9/RE10 above) to match RE3 exactly, since this
+// trap is meant to be correlated 1:1 against RE3's own hits (`hits[]` in
+// Python) -- RE3 merges both SH2 cores' interleaved fetches into one
+// stream on purpose (see the Methodology note in disassembly_evidence.s
+// Sec 0), and a mismatched guard here would silently see only a subset of
+// the same iterations with no way to tell from Python alone.
+enum : uint32 { RE13_LO = 0x060288a6, RE13_HI = 0x06028928 };
+enum : unsigned { RE13_TRACE_SIZE = 4096 };
+uint32 RE13_TracePC[RE13_TRACE_SIZE];
+uint32 RE13_TraceR[RE13_TRACE_SIZE][16];
+uint32 RE13_TraceCount;
+
+// --- Same idea as RE13, narrowed to just the rowA accumulation window
+// (clrmac at 0x060288b4 through the near-clip comparison at 0x060288ca)
+// but also dumping SH7095's own MACH/MACL accumulator members (separate
+// from R[0..15], and needed to see the accumulator settle across the three
+// `mac.l`s, not just the final `sts mach,r11` result). Also logs the
+// AMBIENT RE_GlobalSeq (read-only, NOT incremented, since it must see the
+// SAME counter value RE3 stamps at 0x060288b6 inside this same window) so
+// each row can be tied back to the exact RE3 hit it belongs to rather than
+// assumed by position. Ring buffer, same convention and same unguarded
+// rationale as RE13; sized for one whole frame's worth of calls at up to
+// 12 PCs/iteration (24576 = 1258 * 12 headroom).
+enum : uint32 { RE14_LO = 0x060288b4, RE14_HI = 0x060288cc };
+enum : unsigned { RE14_TRACE_SIZE = 24576 };
+uint32 RE14_TracePC[RE14_TRACE_SIZE];
+uint32 RE14_TraceR[RE14_TRACE_SIZE][16];
+uint32 RE14_TraceMACH[RE14_TRACE_SIZE];
+uint32 RE14_TraceMACL[RE14_TRACE_SIZE];
+uint32 RE14_TraceSeq[RE14_TRACE_SIZE];
+uint32 RE14_TraceCount;
+
+// --- Dumps the ENTIRE WorkRAM (the same 2MB buffer `env.get_ram()` itself
+// reads) at the exact moment each CALL enters this function (PC=
+// 0x060288a6, matching RE4's own target -- once per call, not per vertex),
+// alongside the entry registers -- enough real, complete, mid-frame-
+// accurate data to build a full Python re-implementation of
+// 0x060288a6-0x06028928 and validate it end-to-end against RE2's already-
+// confirmed screen positions, without needing to infer the mechanism from
+// register spot-checks (see disassembly_evidence.s Sec 10 -- this is what
+// finally settled the perspective-divide LUT question). A simple
+// non-wrapping cap, not a ring buffer, is fine here: unlike RE13/RE14 this
+// doesn't need to align with one specific frame's own hits, any N real
+// call snapshots serve the validation purpose equally.
+// RE15_TRACE_SIZE * 2MB dominates this whole patch's state size
+// (200 * 2MB = 400MB) -- confirmed cheap in practice (~0.05s to read a
+// 430MB state).
+enum : uint32 { RE15_TARGET_PC = 0x060288a6 };
+enum : unsigned { RE15_TRACE_SIZE = 200 };
+uint32 RE15_TraceSeq[RE15_TRACE_SIZE];
+uint32 RE15_TraceR4[RE15_TRACE_SIZE];
+uint32 RE15_TraceR6[RE15_TRACE_SIZE];
+uint32 RE15_TracePR[RE15_TRACE_SIZE];
+uint8 RE15_TraceRAM[RE15_TRACE_SIZE][2 * WORKRAM_BANK_SIZE_BYTES];
+uint32 RE15_TraceCount;
+
+static INLINE uint32 RE_ReadWorkRAM32(uint32 addr)
+{
+ uint32 off;
+ if(addr >= 0x00200000 && addr <= 0x003FFFFF)
+  off = addr & 0xFFFFF;
+ else if(addr >= 0x06000000 && addr <= 0x07FFFFFF)
+  off = 0x100000 + (addr & 0xFFFFF);
+ else
+  return 0;
+ uint16 hi = *(uint16*)&WorkRAM[off];
+ uint16 lo = *(uint16*)&WorkRAM[off + 2];
+ return (((uint32)hi) << 16) | lo;
+}
+
+// --- Per-vertex ground truth for the perspective-divide LUT lookup
+// (disassembly_evidence.s Sec 1/10). Fires once per vertex at PC
+// 0x0602890c, the confirmed `mov.l @(0,r0),r3` LUT-coefX load -- R0 was
+// finalized back at 0x60288ea, many instructions earlier, so it's safely
+// stable here. Reads both raw dwords (coefX at R0, coefY at R0+4) directly
+// from WorkRAM at this exact instant via RE_ReadWorkRAM32, rather than
+// trusting a single later env.get_ram() snapshot: that memory is reused
+// per-object within one frame (confirmed by comparing a single
+// dump_perspective_lut() dump against this trap -- reproduction accuracy
+// collapsed from 96.5% within 5px, using RE15's per-call fresh RAM, to ~0%
+// once checked against any frame beyond the very first one captured after
+// reset), so a stale dump is only valid for whichever object happened to
+// touch that address most recently.
+enum : uint32 { RE16_TARGET_PC = 0x0602890c };
+enum : unsigned { RE16_TRACE_SIZE = 16384 };
+uint32 RE16_TraceSeq[RE16_TRACE_SIZE];
+uint32 RE16_TraceAddr[RE16_TRACE_SIZE];
+uint32 RE16_TraceCoefXRaw[RE16_TRACE_SIZE];
+uint32 RE16_TraceCoefYRaw[RE16_TRACE_SIZE];
+uint8 RE16_TraceCore[RE16_TRACE_SIZE];  // 0 = master, 1 = slave -- see RE3_TraceCore's comment
+uint32 RE16_TraceCount;
+
 static int64 CartNV_SaveDelay;
 
 #define SH7095_EXT_MAP_GRAN_BITS 16
@@ -1313,6 +1641,100 @@ MDFN_COLD int LibRetro_StateAction( StateMem* sm, const unsigned load)
   SFPTR8(BackupRAM, sizeof(BackupRAM) / sizeof(BackupRAM[0])),
 
   SFVAR(RecordedNeedEmuICache),
+
+  SFVAR(RE2_TracePC),
+  SFVAR(RE2_TracePR),
+  SFVAR(RE2_TraceAddr),
+  SFVAR(RE2_TraceVal),
+  SFVARN(RE2_TraceR, "&RE2_TraceR[0][0]"),
+  SFVAR(RE2_TraceSeq),
+  SFVAR(RE2_TraceCore),
+  SFVAR(RE2_TraceCount),
+
+  SFVARN(RE3_TraceR, "&RE3_TraceR[0][0]"),
+  SFVARN(RE3_TraceMatrix, "&RE3_TraceMatrix[0][0]"),
+  SFVARN(RE3_TraceVertex, "&RE3_TraceVertex[0][0]"),
+  SFVAR(RE3_TraceSeq),
+  SFVAR(RE3_TraceCore),
+  SFVAR(RE3_TraceCount),
+
+  SFVAR(RE_GlobalSeq),
+
+  SFVAR(RE4_TracePR),
+  SFVAR(RE4_TraceR4),
+  SFVAR(RE4_TraceR6),
+  SFVAR(RE4_TraceVertCount),
+  SFVAR(RE4_TraceSeq),
+  SFVAR(RE4_TraceCore),
+  SFVAR(RE4_TraceCount),
+
+  SFVAR(RE5_TracePC),
+  SFVAR(RE5_TracePR),
+  SFVAR(RE5_TraceAddr),
+  SFVAR(RE5_TraceVal),
+  SFVAR(RE5_TraceSeq),
+  SFVAR(RE5_TraceCount),
+
+  SFVAR(RE6_TraceSeq),
+  SFVAR(RE6_TraceR12),
+  SFVAR(RE6_TraceTx),
+  SFVAR(RE6_TraceTy),
+  SFVAR(RE6_TraceTz),
+  SFVAR(RE6_TraceCount),
+
+  SFVAR(RE7_TraceSeq),
+  SFVARN(RE7_TraceRowB, "&RE7_TraceRowB[0][0]"),
+  SFVARN(RE7_TraceRowC, "&RE7_TraceRowC[0][0]"),
+  SFVAR(RE7_TraceCount),
+
+  SFVAR(RE8_TraceSeq),
+  SFVAR(RE8_TraceObj36),
+  SFVAR(RE8_TraceObj44),
+  SFVAR(RE8_TraceR0),
+  SFVAR(RE8_TraceObj40),
+  SFVAR(RE8_TraceCount),
+
+  SFVAR(RE9_TraceSeq),
+  SFVAR(RE9_TraceR8),
+  SFVARN(RE9_TraceDump, "&RE9_TraceDump[0][0]"),
+  SFVAR(RE9_TraceCount),
+
+  SFVAR(RE10_TracePC),
+  SFVAR(RE10_TraceSeq),
+  SFVAR(RE10_TraceCount),
+
+  SFVAR(RE11_TraceSeq),
+  SFVARN(RE11_TraceR, "&RE11_TraceR[0][0]"),
+  SFVAR(RE11_TraceCount),
+
+  SFVAR(RE12_TraceSeq),
+  SFVARN(RE12_TraceR, "&RE12_TraceR[0][0]"),
+  SFVAR(RE12_TraceCount),
+
+  SFVAR(RE13_TracePC),
+  SFVARN(RE13_TraceR, "&RE13_TraceR[0][0]"),
+  SFVAR(RE13_TraceCount),
+
+  SFVAR(RE14_TracePC),
+  SFVARN(RE14_TraceR, "&RE14_TraceR[0][0]"),
+  SFVAR(RE14_TraceMACH),
+  SFVAR(RE14_TraceMACL),
+  SFVAR(RE14_TraceSeq),
+  SFVAR(RE14_TraceCount),
+
+  SFVAR(RE15_TraceSeq),
+  SFVAR(RE15_TraceR4),
+  SFVAR(RE15_TraceR6),
+  SFVAR(RE15_TracePR),
+  SFVARN(RE15_TraceRAM, "&RE15_TraceRAM[0][0]"),
+  SFVAR(RE15_TraceCount),
+
+  SFVAR(RE16_TraceSeq),
+  SFVAR(RE16_TraceAddr),
+  SFVAR(RE16_TraceCoefXRaw),
+  SFVAR(RE16_TraceCoefYRaw),
+  SFVAR(RE16_TraceCore),
+  SFVAR(RE16_TraceCount),
 
   SFEND
  };

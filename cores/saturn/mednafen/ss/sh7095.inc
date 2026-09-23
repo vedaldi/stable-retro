@@ -2062,6 +2062,31 @@ INLINE void SH7095::ExtBusWrite_INLINE(uint32 A, T V)
 {
  A &= (1U << 27) - 1;
 
+ if(MDFN_UNLIKELY(A >= RE2_STAGING_LO && A < RE2_STAGING_HI))
+ {
+  const unsigned slot = RE2_TraceCount % RE2_TRACE_SIZE;
+  RE2_TracePC[slot] = PC;
+  RE2_TracePR[slot] = PR;
+  RE2_TraceAddr[slot] = A;
+  RE2_TraceVal[slot] = (uint32)V;
+  for(unsigned i = 0; i < 16; i++)
+   RE2_TraceR[slot][i] = R[i];
+  RE2_TraceSeq[slot] = RE_GlobalSeq++;
+  RE2_TraceCore[slot] = (this == &CPU[0]) ? 0 : 1;
+  RE2_TraceCount++;
+ }
+
+ if(MDFN_UNLIKELY(this == &CPU[0] && A >= RE5_MATRIX_LO && A < RE5_MATRIX_HI && RE5_TraceCount < 0x7FFFFFFF))
+ {
+  const unsigned re5_slot = RE5_TraceCount % RE5_TRACE_SIZE;
+  RE5_TracePC[re5_slot] = PC;
+  RE5_TracePR[re5_slot] = PR;
+  RE5_TraceAddr[re5_slot] = A;
+  RE5_TraceVal[re5_slot] = (uint32)V;
+  RE5_TraceSeq[re5_slot] = RE_GlobalSeq++;
+  RE5_TraceCount++;
+ }
+
  if(timestamp > SH7095_mem_timestamp)
   SH7095_mem_timestamp = timestamp;
 
@@ -2758,6 +2783,132 @@ static const uint8 InstrDecodeTab[65536] =
 /*								*/
 #define FetchIF()							\
 {									\
+ if(MDFN_UNLIKELY(PC == RE3_TARGET_PC && RE3_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re3_slot = RE3_TraceCount % RE3_TRACE_SIZE;		\
+  for(unsigned re3_i = 0; re3_i < 16; re3_i++)				\
+   RE3_TraceR[re3_slot][re3_i] = R[re3_i];				\
+  for(unsigned re3_i = 0; re3_i < 24; re3_i++)				\
+   RE3_TraceMatrix[re3_slot][re3_i] = RE_ReadWorkRAM32(R[6] - 48 + re3_i * 4);	\
+  for(unsigned re3_i = 0; re3_i < 5; re3_i++)				\
+   RE3_TraceVertex[re3_slot][re3_i] = RE_ReadWorkRAM32(R[14] + re3_i * 4);	\
+  RE3_TraceSeq[re3_slot] = RE_GlobalSeq++;				\
+  RE3_TraceCore[re3_slot] = (this == &CPU[0]) ? 0 : 1;			\
+  RE3_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC == RE4_TARGET_PC && RE4_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re4_slot = RE4_TraceCount % RE4_TRACE_SIZE;		\
+  RE4_TracePR[re4_slot] = PR;						\
+  RE4_TraceR4[re4_slot] = R[4];					\
+  RE4_TraceR6[re4_slot] = R[6];					\
+  RE4_TraceVertCount[re4_slot] = RE_ReadWorkRAM32(R[4] + 4);		\
+  RE4_TraceSeq[re4_slot] = RE_GlobalSeq++;				\
+  RE4_TraceCore[re4_slot] = (this == &CPU[0]) ? 0 : 1;			\
+  RE4_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC == RE6_TARGET_PC && RE6_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re6_slot = RE6_TraceCount % RE6_TRACE_SIZE;		\
+  RE6_TraceR12[re6_slot] = R[12];					\
+  RE6_TraceTx[re6_slot] = R[4];					\
+  RE6_TraceTy[re6_slot] = R[5];					\
+  RE6_TraceTz[re6_slot] = R[6];					\
+  RE6_TraceSeq[re6_slot] = RE_GlobalSeq++;				\
+  RE6_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC == RE7_TARGET_PC && RE7_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re7_slot = RE7_TraceCount % RE7_TRACE_SIZE;		\
+  for(unsigned re7_i = 0; re7_i < 3; re7_i++)				\
+  {									\
+   RE7_TraceRowB[re7_slot][re7_i] = RE_ReadWorkRAM32(RE5_MATRIX_LO + 0 + re7_i * 4);	\
+   RE7_TraceRowC[re7_slot][re7_i] = RE_ReadWorkRAM32(RE5_MATRIX_LO + 16 + re7_i * 4);	\
+  }									\
+  RE7_TraceSeq[re7_slot] = RE_GlobalSeq++;				\
+  RE7_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC == RE8_TARGET_PC && RE8_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re8_slot = RE8_TraceCount % RE8_TRACE_SIZE;		\
+  RE8_TraceObj36[re8_slot] = RE_ReadWorkRAM32(R[0] + 36);		\
+  RE8_TraceObj44[re8_slot] = RE_ReadWorkRAM32(R[0] + 44);		\
+  RE8_TraceR0[re8_slot] = R[0];					\
+  RE8_TraceObj40[re8_slot] = RE_ReadWorkRAM32(R[0] + 40);		\
+  RE8_TraceSeq[re8_slot] = RE_GlobalSeq++;				\
+  RE8_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC == RE9_TARGET_PC && RE9_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re9_slot = RE9_TraceCount % RE9_TRACE_SIZE;		\
+  RE9_TraceR8[re9_slot] = R[8];					\
+  for(unsigned re9_i = 0; re9_i < 11; re9_i++)				\
+   RE9_TraceDump[re9_slot][re9_i] = RE_ReadWorkRAM32(R[8] + re9_i * 4);	\
+  RE9_TraceSeq[re9_slot] = RE_GlobalSeq++;				\
+  RE9_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC >= RE10_LO && PC < RE10_HI && RE10_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re10_slot = RE10_TraceCount % RE10_TRACE_SIZE;	\
+  RE10_TracePC[re10_slot] = PC;					\
+  RE10_TraceSeq[re10_slot] = RE_GlobalSeq++;				\
+  RE10_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC == RE11_TARGET_PC && RE11_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re11_slot = RE11_TraceCount % RE11_TRACE_SIZE;	\
+  for(unsigned re11_i = 0; re11_i < 16; re11_i++)			\
+   RE11_TraceR[re11_slot][re11_i] = R[re11_i];				\
+  RE11_TraceSeq[re11_slot] = RE_GlobalSeq++;				\
+  RE11_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC == RE12_TARGET_PC && RE12_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re12_slot = RE12_TraceCount % RE12_TRACE_SIZE;	\
+  for(unsigned re12_i = 0; re12_i < 16; re12_i++)			\
+   RE12_TraceR[re12_slot][re12_i] = R[re12_i];				\
+  RE12_TraceSeq[re12_slot] = RE_GlobalSeq++;				\
+  RE12_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC >= RE13_LO && PC < RE13_HI && RE13_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re13_slot = RE13_TraceCount % RE13_TRACE_SIZE;	\
+  RE13_TracePC[re13_slot] = PC;					\
+  for(unsigned re13_i = 0; re13_i < 16; re13_i++)			\
+   RE13_TraceR[re13_slot][re13_i] = R[re13_i];				\
+  RE13_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC >= RE14_LO && PC < RE14_HI && RE14_TraceCount < 0x7FFFFFFF))	\
+ {									\
+  const unsigned re14_slot = RE14_TraceCount % RE14_TRACE_SIZE;	\
+  RE14_TracePC[re14_slot] = PC;					\
+  for(unsigned re14_i = 0; re14_i < 16; re14_i++)			\
+   RE14_TraceR[re14_slot][re14_i] = R[re14_i];				\
+  RE14_TraceMACH[re14_slot] = MACH;					\
+  RE14_TraceMACL[re14_slot] = MACL;					\
+  RE14_TraceSeq[re14_slot] = RE_GlobalSeq;				\
+  RE14_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(this == &CPU[0] && PC == RE15_TARGET_PC && RE15_TraceCount < RE15_TRACE_SIZE))	\
+ {									\
+  RE15_TraceSeq[RE15_TraceCount] = RE_GlobalSeq;			\
+  RE15_TraceR4[RE15_TraceCount] = R[4];				\
+  RE15_TraceR6[RE15_TraceCount] = R[6];				\
+  RE15_TracePR[RE15_TraceCount] = PR;					\
+  memcpy(RE15_TraceRAM[RE15_TraceCount], WorkRAM, sizeof(WorkRAM));	\
+  RE15_TraceCount++;							\
+ }									\
+ if(MDFN_UNLIKELY(PC == RE16_TARGET_PC))				\
+ {									\
+  const unsigned re16_slot = RE16_TraceCount % RE16_TRACE_SIZE;	\
+  const uint32 re16_addr = R[0];					\
+  RE16_TraceSeq[re16_slot] = RE_GlobalSeq++;				\
+  RE16_TraceAddr[re16_slot] = re16_addr;				\
+  RE16_TraceCoefXRaw[re16_slot] = RE_ReadWorkRAM32(re16_addr);		\
+  RE16_TraceCoefYRaw[re16_slot] = RE_ReadWorkRAM32(re16_addr + 4);	\
+  RE16_TraceCore[re16_slot] = (this == &CPU[0]) ? 0 : 1;		\
+  RE16_TraceCount++;							\
+ }									\
  if(EmulateICache)							\
  {									\
   Pipe_IF = (uint16)IBuffer;						\

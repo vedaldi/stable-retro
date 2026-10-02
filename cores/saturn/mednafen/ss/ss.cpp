@@ -143,15 +143,11 @@ uint32 RE2_TraceCount;
 enum : uint32 { RE3_TARGET_PC = 0x060288b6 };
 enum : unsigned { RE3_TRACE_SIZE = 8192 };
 uint32 RE3_TraceR[RE3_TRACE_SIZE][16];
-uint32 RE3_TraceMatrix[RE3_TRACE_SIZE][24];  // words at R[6]-48 .. R[6]+44, step 4 -- the extra
-                                              // 4 words (+32..+44) beyond the original +28 cover
-                                              // the disassembly's own "true rowA"/"bias0" position
-                                              // (see disassembly_evidence.s Sec 10): R[6] here is
-                                              // captured BEFORE the loop's own `add #32,r6` has
-                                              // taken effect (a timing quirk of this direct-memory-
-                                              // read hook, confirmed empirically), so every other
-                                              // established word-offset in this file is 32 bytes
-                                              // higher than this R[6] would suggest at first glance
+uint32 RE3_TraceMatrix[RE3_TRACE_SIZE][24];  // words at R[6]-48 .. R[6]+44, step 4. R[6] is the live
+                                              // value just before 0x060288b6's mac.l, i.e. after the
+                                              // loop's `add #32,r6`: rowA at R6+0..+8, bias0 at +12,
+                                              // rowB/rowC in the 32 bytes below (see
+                                              // disassembly_evidence.s Sec 10)
 uint32 RE3_TraceVertex[RE3_TRACE_SIZE][5];
 uint32 RE3_TraceSeq[RE3_TRACE_SIZE];  // RE_GlobalSeq at the time of this vertex hit
 uint8 RE3_TraceCore[RE3_TRACE_SIZE];  // 0 = master (CPU[0]), 1 = slave -- RE3 is deliberately
@@ -289,6 +285,8 @@ uint32 RE8_TraceCount;
 // 2-byte instruction, consistently. An emulator-internal branch-target
 // fetch-path quirk (game logic is unaffected; R8 is untouched by the
 // skipped `mov.l @(12,r8),r4`), not a game bug -- retarget 2 bytes later.
+// (Since fixed: traps now run in SH7095::Step() keyed on PC_ID, which does
+// see branch targets; RE9 stays at +2 so its existing captures remain valid.)
 enum : uint32 { RE9_TARGET_PC = 0x0602e0c8 };
 enum : unsigned { RE9_TRACE_SIZE = 4096 };
 uint32 RE9_TraceSeq[RE9_TRACE_SIZE];

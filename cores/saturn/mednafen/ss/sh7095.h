@@ -607,6 +607,7 @@ class SH7095 final
  bool EIC_Setting;
  bool DM_Setting;
  uint32 PC_IF, PC_ID;	// Debug-related variables.
+ uint32 RE_EX_PC;	// RE traps: address of the instruction currently executing.
  const char* const cpu_name;
  const void*const* ResumeTableP[2];
 };

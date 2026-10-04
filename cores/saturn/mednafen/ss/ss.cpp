@@ -120,7 +120,7 @@ static int64 BackupRAM_SaveDelay;
 //
 // Records go into a ring buffer, one per vertex, in execution order; Python
 // diffs RE_VT_Count across env.step() to find the records written during
-// that frame. The layout is mirrored by `VtRecord` in src/vf2/pose_extract.py.
+// that frame. The layout is mirrored by `VtRecord` in src/vf2/vt.py.
 enum : uint32 { RE_VT_PC = 0x06028922 };
 struct RE_VTRecord
 {

@@ -118,12 +118,17 @@ static int64 BackupRAM_SaveDelay;
 //   R0  = &LUT[lut_index], R11 = zp_cam, R2 = packed(u, v) about to be
 //   stored at R12, R5 = packed(zp_cam, x_cam) already stored at R12+4
 //
-// Records go into a ring buffer, one per vertex, in execution order; Python
-// diffs RE_VT_Count across env.step() to find the records written during
-// that frame. The layout is mirrored by `VtRecord` in src/vf2/vt.py.
+// Records go into a ring buffer, one per vertex, in execution order, each
+// tagged with RE_VT.frame, the index of the Emulate() call (= env.step()) it
+// was written in; Python selects a frame's records by that tag, within the
+// last min(RE_VT.count, RE_VT_TRACE_SIZE) slots. RE_VT -- counters and buffer
+// -- is one savestate entry, so a state either restores all of it or (if
+// saved with a different layout) none of it, and the two always agree. The
+// layout is mirrored by `VtTrace` and `VtCallRecord` in src/vf2/vt.py.
 enum : uint32 { RE_VT_PC = 0x06028922 };
 struct RE_VTRecord
 {
+ uint32 frame;        // RE_VT.frame when written
  uint32 core;         // 0 = master (CPU[0]), 1 = slave
  uint32 pr;           // caller's return address
  uint32 pdata;        // PDATA* argument (read from @R15)
@@ -136,14 +141,19 @@ struct RE_VTRecord
  uint32 zp_cam;       // R11
  uint32 lut_addr;     // R0
  uint32 lut[2];       // LUT[lut_index] = (coef_x, coef_y), Q16.16
- uint32 out0;         // R2: packed(u, v), screen position relative to center
- uint32 out1;         // R5: packed(zp_cam, x_cam)
+ uint32 out[2];       // output slot: R2 = packed(u, v), screen position relative to center; R5 = packed(zp_cam, x_cam)
  uint32 out_addr;     // R12: output slot
 };
-static_assert(sizeof(RE_VTRecord) == 29 * sizeof(uint32), "RE_VTRecord must have no padding");
+static_assert(sizeof(RE_VTRecord) == 30 * sizeof(uint32), "RE_VTRecord must have no padding");
 enum : unsigned { RE_VT_TRACE_SIZE = 8192 };
-RE_VTRecord RE_VT_Trace[RE_VT_TRACE_SIZE];
-uint32 RE_VT_Count;
+struct RE_VTTrace
+{
+ uint32 count;  // records written so far; the next goes to records[count % RE_VT_TRACE_SIZE]
+ uint32 frame;  // Emulate() calls so far
+ RE_VTRecord records[RE_VT_TRACE_SIZE];
+};
+static_assert(sizeof(RE_VTTrace) == (2 + RE_VT_TRACE_SIZE * 30) * sizeof(uint32), "RE_VTTrace must have no padding");
+RE_VTTrace RE_VT;
 
 static INLINE uint32 RE_ReadWorkRAM32(uint32 addr)
 {
@@ -780,6 +790,7 @@ void Emulate(EmulateSpecStruct* espec_arg)
  else
   end_ts = RunLoop<false>(espec);
  assert(end_ts >= 0);
+ RE_VT.frame++;
 
  ForceEventUpdates(end_ts);
  //
@@ -1375,8 +1386,7 @@ MDFN_COLD int LibRetro_StateAction( StateMem* sm, const unsigned load)
 
   SFVAR(RecordedNeedEmuICache),
 
-  SFPTR32N(&RE_VT_Trace[0].core, sizeof(RE_VT_Trace) / sizeof(uint32), "RE_VT_Trace"),
-  SFVAR(RE_VT_Count),
+  SFPTR32N(&RE_VT.count, sizeof(RE_VT) / sizeof(uint32), "RE_VT"),
 
   SFEND
  };

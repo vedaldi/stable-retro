@@ -2763,8 +2763,9 @@ static const uint8 InstrDecodeTab[65536] =
 {                                                                       \
  if(MDFN_UNLIKELY(PC_ID == RE_VT_PC))                                   \
  {                                                                      \
-  RE_VTRecord& re_rec = RE_VT_Trace[RE_VT_Count % RE_VT_TRACE_SIZE];    \
+  RE_VTRecord& re_rec = RE_VT.records[RE_VT.count % RE_VT_TRACE_SIZE]; \
   const uint32 re_vertex = R[14] - 12;                                  \
+  re_rec.frame = RE_VT.frame;                                           \
   re_rec.core = (this == &CPU[0]) ? 0 : 1;                              \
   re_rec.pr = PR;                                                       \
   re_rec.pdata = RE_ReadWorkRAM32(R[15]);                               \
@@ -2780,10 +2781,10 @@ static const uint8 InstrDecodeTab[65536] =
   re_rec.lut_addr = R[0];                                               \
   re_rec.lut[0] = RE_ReadWorkRAM32(R[0]);                               \
   re_rec.lut[1] = RE_ReadWorkRAM32(R[0] + 4);                           \
-  re_rec.out0 = R[2];                                                   \
-  re_rec.out1 = R[5];                                                   \
+  re_rec.out[0] = R[2];                                                 \
+  re_rec.out[1] = R[5];                                                 \
   re_rec.out_addr = R[12];                                              \
-  RE_VT_Count++;                                                        \
+  RE_VT.count++;                                                        \
  }                                                                      \
 }
 

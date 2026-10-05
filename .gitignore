@@ -132,6 +132,11 @@ lib*.a
 stable_retro/cores/*-version
 stable_retro/cores/*.json
 
+# BIOS and backup-RAM files placed next to the cores (copyrighted; never commit)
+stable_retro/cores/*.bin
+stable_retro/cores/*.bkr
+stable_retro/cores/*.smpc
+
 # FBNeo build artifacts (only ignore actual build outputs, not source dependencies)
 cores/fbneo/src/obj/
 cores/fbneo/*.so

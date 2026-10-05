@@ -12,8 +12,11 @@ class CMakeBuild(build_ext):
     def run(self):
         suffix = super().get_ext_filename("")
         pyext_suffix = f"-DPYEXT_SUFFIX={suffix}"
-        pylib_dir = ""
-        if not self.inplace:
+        # Build into the source package for in-place and editable (PEP 660)
+        # builds, so an editable install imports these outputs directly
+        # instead of a second, unused copy under build/.
+        pylib_dir = f"-DPYLIB_DIRECTORY={os.path.dirname(os.path.abspath(__file__))}"
+        if not self.inplace and not getattr(self, "editable_mode", False):
             pylib_dir = f"-DPYLIB_DIRECTORY={self.build_lib}"
         if self.debug:
             build_type = "-DCMAKE_BUILD_TYPE=Debug"

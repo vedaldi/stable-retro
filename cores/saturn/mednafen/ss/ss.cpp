@@ -143,8 +143,10 @@ struct RE_VTRecord
  uint32 lut[2];       // LUT[lut_index] = (coef_x, coef_y), Q16.16
  uint32 out[2];       // output slot: R2 = packed(u, v), screen position relative to center; R5 = packed(zp_cam, x_cam)
  uint32 out_addr;     // R12: output slot
+ uint32 player;       // whose draw pass the call is in (RE_VT_Ctx): 0 = none, 1, 2
+ uint32 part;         // what the call draws (RE_VT_Ctx): RE_PART_*
 };
-static_assert(sizeof(RE_VTRecord) == 30 * sizeof(uint32), "RE_VTRecord must have no padding");
+static_assert(sizeof(RE_VTRecord) == 32 * sizeof(uint32), "RE_VTRecord must have no padding");
 enum : unsigned { RE_VT_TRACE_SIZE = 8192 };
 struct RE_VTTrace
 {
@@ -152,8 +154,92 @@ struct RE_VTTrace
  uint32 frame;  // Emulate() calls so far
  RE_VTRecord records[RE_VT_TRACE_SIZE];
 };
-static_assert(sizeof(RE_VTTrace) == (2 + RE_VT_TRACE_SIZE * 30) * sizeof(uint32), "RE_VTTrace must have no padding");
+static_assert(sizeof(RE_VTTrace) == (2 + RE_VT_TRACE_SIZE * 32) * sizeof(uint32), "RE_VTTrace must have no padding");
 RE_VTTrace RE_VT;
+
+// What each vertex transform call draws, from the return addresses on the
+// stack at its entry (RE_VT_ENTRY_PC; see docs/vf2-scene-objects.md). Each
+// player is drawn by 0x06017B54: player 1 on the master, returning to
+// 0x06017AE8, player 2 as a slave task, returning to 0x06017B44. Within it,
+// the innermost of these return addresses identifies the part. Set per core
+// at each call's entry; copied into the call's RE_VTRecords.
+enum : uint32 { RE_VT_ENTRY_PC = 0x060288A4 };
+enum : uint32
+{
+ RE_PART_NONE = 0,          // not inside a player's draw
+ RE_PART_OTHER = 1,         // inside 0x06017B54, no known part
+ RE_PART_BODY = 2,          // the body, drawn inline (returns 0x06017C12, 0x06017C1E)
+ RE_PART_HAIR = 3,          // 0x06023D44 (returns 0x06017BCC)
+ RE_PART_SHADOW = 4,        // ground shadows, 0x06017E54 (returns 0x06017BC0)
+ RE_PART_STAGE_EFFECT = 5,  // 0x0602C8F4, e.g. the leaves (returns 0x0602C820); player 1's pass only
+ RE_PART_PLAYER_EFFECT = 6, // 0x0602C832, per player (returns 0x0602C7C8); player 1's pass only
+};
+enum : unsigned { RE_VT_CTX_SCAN = 512 };  // stack words searched
+struct RE_VTContext { uint32 player, part; };
+static RE_VTContext RE_VT_Ctx[2];  // per core, for the call in progress
+
+// RE_WR: a write watch on one physical address range [lo, hi) (A & 0x07FFFFFF,
+// so cache-through mirrors coincide; e.g. VDP2 VRAM is 0x05E00000-0x05E80000).
+// Logs every SH-2 store into it (with the storing core's PC and PR), every
+// SCU DMA transfer whose destination overlaps it, and every SH-2 DMAC unit
+// written into it. The range is re-read at each Emulate() from the
+// environment variable VF2_WATCH="lo:hi" (C integer syntax); unset = off.
+enum : uint32 { RE_WR_STORE = 0, RE_WR_SCU_DMA = 1, RE_WR_SH2_DMA = 2 };
+struct RE_WRRecord
+{
+ uint32 frame;   // RE_VT.frame when written
+ uint32 kind;    // RE_WR_*
+ uint32 unit;    // store/SH-2 DMA: core (0 = master); SCU DMA: level
+ uint32 pc;      // store: address of the store instruction; else 0
+ uint32 pr;      // store: PR; else 0
+ uint32 addr;    // store/SH-2 DMA: address written; SCU DMA: destination start
+ uint32 value;   // store: value; SCU DMA/SH-2 DMA: source address
+ uint32 size;    // store/SH-2 DMA: bytes; SCU DMA: byte count
+};
+enum : unsigned { RE_WR_TRACE_SIZE = 16384 };
+struct RE_WRTrace
+{
+ uint32 count;  // records written so far; the next goes to records[count % RE_WR_TRACE_SIZE]
+ uint32 lo, hi; // the watched range (lo == hi: off)
+ RE_WRRecord records[RE_WR_TRACE_SIZE];
+};
+static_assert(sizeof(RE_WRTrace) == (3 + RE_WR_TRACE_SIZE * 8) * sizeof(uint32), "RE_WRTrace must have no padding");
+RE_WRTrace RE_WR;
+
+// RE_PT: a register snapshot at one PC, set at each Emulate() from the
+// environment variable VF2_TRAP="pc:reg" (unset = off): all registers, and
+// the RE_PT_MEM words at the address in R[reg]. Runs where RE_VT does (RE_TRAPS()),
+// just before the instruction at pc executes.
+enum : unsigned { RE_PT_MEM = 256 };  // words snapshotted at R[reg] (e.g. the stack, reg 15)
+struct RE_PTRecord
+{
+ uint32 frame;
+ uint32 core;
+ uint32 R[16];
+ uint32 pr, gbr, mach, macl;
+ uint32 mem[RE_PT_MEM];
+};
+enum : unsigned { RE_PT_TRACE_SIZE = 256 };
+struct RE_PTTrace
+{
+ uint32 count;
+ uint32 pc, reg;  // pc == 0: off
+ RE_PTRecord records[RE_PT_TRACE_SIZE];
+};
+static_assert(sizeof(RE_PTRecord) == (22 + RE_PT_MEM) * sizeof(uint32), "RE_PTRecord must have no padding");
+RE_PTTrace RE_PT;
+
+static INLINE bool RE_WR_Hit(uint32 a, uint32 n)
+{
+ a &= 0x07FFFFFF;
+ return a < RE_WR.hi && a + n > RE_WR.lo;
+}
+
+static INLINE void RE_WR_Log(uint32 kind, uint32 unit, uint32 pc, uint32 pr, uint32 addr, uint32 value, uint32 size)
+{
+ RE_WRRecord& r = RE_WR.records[RE_WR.count++ % RE_WR_TRACE_SIZE];
+ r = { RE_VT.frame, kind, unit, pc, pr, addr, value, size };
+}
 
 static INLINE uint32 RE_ReadWorkRAM32(uint32 addr)
 {
@@ -167,6 +253,33 @@ static INLINE uint32 RE_ReadWorkRAM32(uint32 addr)
  uint16 hi = *(uint16*)&WorkRAM[off];
  uint16 lo = *(uint16*)&WorkRAM[off + 2];
  return (((uint32)hi) << 16) | lo;
+}
+
+static RE_VTContext RE_VT_Classify(uint32 sp)
+{
+ RE_VTContext ctx = { 0, RE_PART_NONE };
+ for(unsigned i = 0; i < RE_VT_CTX_SCAN && !ctx.player; i++)
+ {
+  const uint32 w = RE_ReadWorkRAM32(sp + i * 4);
+  uint32 part = RE_PART_NONE;
+  switch(w)
+  {
+   case 0x06017AE8: ctx.player = 1; break;
+   case 0x06017B44: ctx.player = 2; break;
+   case 0x06017C12: case 0x06017C1E: part = RE_PART_BODY; break;
+   case 0x06017BCC: part = RE_PART_HAIR; break;
+   case 0x06017BC0: part = RE_PART_SHADOW; break;
+   case 0x0602C820: part = RE_PART_STAGE_EFFECT; break;
+   case 0x0602C7C8: part = RE_PART_PLAYER_EFFECT; break;
+  }
+  if(part != RE_PART_NONE && ctx.part == RE_PART_NONE)
+   ctx.part = part;  // the innermost
+ }
+ if(ctx.player && ctx.part == RE_PART_NONE)
+  ctx.part = RE_PART_OTHER;
+ if(!ctx.player)
+  ctx.part = RE_PART_NONE;
+ return ctx;
 }
 
 static int64 CartNV_SaveDelay;
@@ -772,6 +885,26 @@ static sscpu_timestamp_t MidSync(const sscpu_timestamp_t timestamp)
 void Emulate(EmulateSpecStruct* espec_arg)
 {
  int32 end_ts;
+
+ {
+  const char* w = getenv("VF2_WATCH");
+  char* end = nullptr;
+  RE_WR.lo = RE_WR.hi = 0;
+  if(w)
+  {
+   RE_WR.lo = strtoul(w, &end, 0) & 0x07FFFFFF;
+   if(end && *end == ':')
+    RE_WR.hi = strtoul(end + 1, nullptr, 0) & 0x07FFFFFF;
+  }
+  const char* t = getenv("VF2_TRAP");
+  RE_PT.pc = RE_PT.reg = 0;
+  if(t)
+  {
+   RE_PT.pc = strtoul(t, &end, 0);
+   if(end && *end == ':')
+    RE_PT.reg = strtoul(end + 1, nullptr, 0) & 0xF;
+  }
+ }
 
  espec = espec_arg;
  AllowMidSync = setting_midsync;
@@ -1387,6 +1520,8 @@ MDFN_COLD int LibRetro_StateAction( StateMem* sm, const unsigned load)
   SFVAR(RecordedNeedEmuICache),
 
   SFPTR32N(&RE_VT.count, sizeof(RE_VT) / sizeof(uint32), "RE_VT"),
+  SFPTR32N(&RE_WR.count, sizeof(RE_WR) / sizeof(uint32), "RE_WR"),
+  SFPTR32N(&RE_PT.count, sizeof(RE_PT) / sizeof(uint32), "RE_PT"),
 
   SFEND
  };

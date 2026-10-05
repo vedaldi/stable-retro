@@ -527,6 +527,9 @@ INLINE void SH7095::DMA_DoTransfer(unsigned ch)
  uint32 dar = DMACH[ch].DAR;
  uint32 tcr = DMACH[ch].TCR;
 
+ if(MDFN_UNLIKELY(RE_WR_Hit(dar, 1U << std::min<unsigned>(ts, 2) << (ts == 3 ? 2 : 0))))
+  RE_WR_Log(RE_WR_SH2_DMA, this != &CPU[0], 0, 0, dar & 0x07FFFFFF, sar & 0x07FFFFFF, 1U << std::min<unsigned>(ts, 2) << (ts == 3 ? 2 : 0));
+
  switch(ts)
  {
   case 0x00:	// 8-bit
@@ -2062,6 +2065,9 @@ INLINE void SH7095::ExtBusWrite_INLINE(uint32 A, T V)
 {
  A &= (1U << 27) - 1;
 
+ if(MDFN_UNLIKELY(RE_WR_Hit(A, sizeof(T))))
+  RE_WR_Log(RE_WR_STORE, this != &CPU[0], PC_ID, PR, A, V, sizeof(T));
+
  if(timestamp > SH7095_mem_timestamp)
   SH7095_mem_timestamp = timestamp;
 
@@ -2784,7 +2790,25 @@ static const uint8 InstrDecodeTab[65536] =
   re_rec.out[0] = R[2];                                                 \
   re_rec.out[1] = R[5];                                                 \
   re_rec.out_addr = R[12];                                              \
+  re_rec.player = RE_VT_Ctx[re_rec.core].player;                        \
+  re_rec.part = RE_VT_Ctx[re_rec.core].part;                            \
   RE_VT.count++;                                                        \
+ }                                                                      \
+ if(MDFN_UNLIKELY(PC_ID == RE_VT_ENTRY_PC))                             \
+  RE_VT_Ctx[this != &CPU[0]] = RE_VT_Classify(R[15]);                   \
+ if(MDFN_UNLIKELY(PC_ID == RE_PT.pc))                                   \
+ {                                                                      \
+  RE_PTRecord& re_pt = RE_PT.records[RE_PT.count++ % RE_PT_TRACE_SIZE]; \
+  re_pt.frame = RE_VT.frame;                                            \
+  re_pt.core = (this == &CPU[0]) ? 0 : 1;                               \
+  for(unsigned re_i = 0; re_i < 16; re_i++)                             \
+   re_pt.R[re_i] = R[re_i];                                             \
+  re_pt.pr = PR;                                                        \
+  re_pt.gbr = GBR;                                                      \
+  re_pt.mach = MACH;                                                    \
+  re_pt.macl = MACL;                                                    \
+  for(unsigned re_i = 0; re_i < RE_PT_MEM; re_i++)                      \
+   re_pt.mem[re_i] = RE_ReadWorkRAM32(R[RE_PT.reg] + re_i * 4);         \
  }                                                                      \
 }
 

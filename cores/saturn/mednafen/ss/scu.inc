@@ -1282,9 +1282,7 @@ static bool StartDMATransfer(DMALevelS* d, const uint32 ra, const uint32 wa, con
  if(MDFN_UNLIKELY(rb == wb))
   return false;
 
- if(MDFN_UNLIKELY(RE_WR_Hit(wa, bc)))
-  RE_WR_Log(RE_WR_SCU_DMA, (unsigned)(d - DMALevel), 0, 0, wa & 0x07FFFFFF, ra & 0x07FFFFFF, bc);
-
+ VF2RE_SCU_DMA(d, wa, ra, bc);
  d->CurReadBase = ra &~ 0x3;
  d->CurReadSub = ra & 0x3;
 

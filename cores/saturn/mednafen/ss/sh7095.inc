@@ -527,9 +527,7 @@ INLINE void SH7095::DMA_DoTransfer(unsigned ch)
  uint32 dar = DMACH[ch].DAR;
  uint32 tcr = DMACH[ch].TCR;
 
- if(MDFN_UNLIKELY(RE_WR_Hit(dar, 1U << std::min<unsigned>(ts, 2) << (ts == 3 ? 2 : 0))))
-  RE_WR_Log(RE_WR_SH2_DMA, this != &CPU[0], 0, 0, dar & 0x07FFFFFF, sar & 0x07FFFFFF, 1U << std::min<unsigned>(ts, 2) << (ts == 3 ? 2 : 0));
-
+ VF2RE_SH2_DMA(dar, sar, ts);
  switch(ts)
  {
   case 0x00:	// 8-bit
@@ -2065,9 +2063,7 @@ INLINE void SH7095::ExtBusWrite_INLINE(uint32 A, T V)
 {
  A &= (1U << 27) - 1;
 
- if(MDFN_UNLIKELY(RE_WR_Hit(A, sizeof(T))))
-  RE_WR_Log(RE_WR_STORE, this != &CPU[0], PC_ID, PR, A, V, sizeof(T));
-
+ VF2RE_EXTBUS_WRITE(A, V);
  if(timestamp > SH7095_mem_timestamp)
   SH7095_mem_timestamp = timestamp;
 
@@ -2760,59 +2756,6 @@ static const uint8 InstrDecodeTab[65536] =
 };
 
 /*								*/
-/* RE trace traps.  Run at the start of each instruction's EX step, keyed on */
-/* PC_ID (the address of the instruction in Pipe_ID): every earlier        */
-/* instruction has completed and the one at PC_ID has not yet run, so      */
-/* registers and memory are exactly as they are just before PC_ID.        */
-/*								*/
-#define RE_TRAPS()                                                      \
-{                                                                       \
- if(MDFN_UNLIKELY(PC_ID == RE_VT_PC))                                   \
- {                                                                      \
-  RE_VTRecord& re_rec = RE_VT.records[RE_VT.count % RE_VT_TRACE_SIZE]; \
-  const uint32 re_vertex = R[14] - 12;                                  \
-  re_rec.frame = RE_VT.frame;                                           \
-  re_rec.core = (this == &CPU[0]) ? 0 : 1;                              \
-  re_rec.pr = PR;                                                       \
-  re_rec.pdata = RE_ReadWorkRAM32(R[15]);                               \
-  re_rec.pntbl = RE_ReadWorkRAM32(re_rec.pdata);                        \
-  re_rec.remaining = R[13];                                             \
-  re_rec.vertex_addr = re_vertex;                                       \
-  for(unsigned re_i = 0; re_i < 3; re_i++)                              \
-   re_rec.vertex[re_i] = RE_ReadWorkRAM32(re_vertex + re_i * 4);        \
-  re_rec.matrix_addr = R[6];                                            \
-  for(unsigned re_i = 0; re_i < 12; re_i++)                             \
-   re_rec.matrix[re_i] = RE_ReadWorkRAM32(R[6] + re_i * 4);             \
-  re_rec.zp_cam = R[11];                                                \
-  re_rec.lut_addr = R[0];                                               \
-  re_rec.lut[0] = RE_ReadWorkRAM32(R[0]);                               \
-  re_rec.lut[1] = RE_ReadWorkRAM32(R[0] + 4);                           \
-  re_rec.out[0] = R[2];                                                 \
-  re_rec.out[1] = R[5];                                                 \
-  re_rec.out_addr = R[12];                                              \
-  re_rec.player = RE_VT_Ctx[re_rec.core].player;                        \
-  re_rec.part = RE_VT_Ctx[re_rec.core].part;                            \
-  RE_VT.count++;                                                        \
- }                                                                      \
- if(MDFN_UNLIKELY(PC_ID == RE_VT_ENTRY_PC))                             \
-  RE_VT_Ctx[this != &CPU[0]] = RE_VT_Classify(R[15]);                   \
- if(MDFN_UNLIKELY(PC_ID == RE_PT.pc))                                   \
- {                                                                      \
-  RE_PTRecord& re_pt = RE_PT.records[RE_PT.count++ % RE_PT_TRACE_SIZE]; \
-  re_pt.frame = RE_VT.frame;                                            \
-  re_pt.core = (this == &CPU[0]) ? 0 : 1;                               \
-  for(unsigned re_i = 0; re_i < 16; re_i++)                             \
-   re_pt.R[re_i] = R[re_i];                                             \
-  re_pt.pr = PR;                                                        \
-  re_pt.gbr = GBR;                                                      \
-  re_pt.mach = MACH;                                                    \
-  re_pt.macl = MACL;                                                    \
-  for(unsigned re_i = 0; re_i < RE_PT_MEM; re_i++)                      \
-   re_pt.mem[re_i] = RE_ReadWorkRAM32(R[RE_PT.reg] + re_i * 4);         \
- }                                                                      \
-}
-
-/*								*/
 /* TODO: Stop reading from memory when an exception is pending? */
 /*								*/
 #define FetchIF()							\
@@ -2957,7 +2900,6 @@ static const uint8 InstrDecodeTab[65536] =
  PC = target;								\
 									\
  PC_ID = PC_IF;							\
-									\
  Pipe_ID = Pipe_IF | ((InstrDecodeTab[Pipe_IF] | 0x80) << 24);		\
 									\
  timestamp++;								\
@@ -3086,11 +3028,7 @@ INLINE void SH7095::Step(void)
   FRT_WDT_Recalc_NET();
  }
 
- // Pseudo-ops (standby, exception pending, DMA burst stall) aren't real
- // instructions; skip them so a trap fires once per executed instruction.
- if(MDFN_LIKELY(((Pipe_ID >> 24) & 0x7F) < 0x7E))
-  RE_TRAPS();
-
+ VF2RE_STEP();
  const uint32 instr = (uint16)Pipe_ID;
  const unsigned instr_nyb1 = (instr >> 4) & 0xF;
  const unsigned instr_nyb2 = (instr >> 8) & 0xF;

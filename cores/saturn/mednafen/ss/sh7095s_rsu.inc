@@ -29,11 +29,7 @@
    FRT_WDT_Recalc_NET();
   }
 
-  // Pseudo-ops (standby, exception pending, DMA burst stall) aren't real
-  // instructions; skip them so a trap fires once per executed instruction.
-  if(MDFN_LIKELY(((Pipe_ID >> 24) & 0x7F) < 0x7E))
-   RE_TRAPS();
-
+  VF2RE_STEP();
   instr = (uint16)Pipe_ID;
   //
   #include "sh7095_ops.inc"

@@ -38,7 +38,8 @@
 //
 // Records go into a ring buffer, one per vertex, in execution order, each
 // tagged with RE_VT.frame, the index of the Emulate() call (= env.step()) it
-// was written in; Python selects a frame's records by that tag, within the
+// was written in, and RE_VT.loop, the game's logical frame (see RE_LOOP_PC
+// below); Python selects a frame's records by these tags, within the
 // last min(RE_VT.count, RE_VT_TRACE_SIZE) slots. RE_VT -- counters and buffer
 // -- is one savestate entry, so a state either restores all of it or (if
 // saved with a different layout) none of it, and the two always agree. The
@@ -47,6 +48,7 @@ enum : uint32 { RE_VT_PC = 0x06028922 };
 struct RE_VTRecord
 {
  uint32 frame;        // RE_VT.frame when written
+ uint32 loop;         // RE_VT.loop when written: the game's logical frame
  uint32 core;         // 0 = master (CPU[0]), 1 = slave
  uint32 pr;           // caller's return address
  uint32 pdata;        // PDATA* argument (read from @R15)
@@ -64,16 +66,28 @@ struct RE_VTRecord
  uint32 player;       // whose draw pass the call is in (RE_VT_Ctx): 0 = none, 1, 2
  uint32 part;         // what the call draws (RE_VT_Ctx): RE_PART_*
 };
-static_assert(sizeof(RE_VTRecord) == 32 * sizeof(uint32), "RE_VTRecord must have no padding");
+static_assert(sizeof(RE_VTRecord) == 33 * sizeof(uint32), "RE_VTRecord must have no padding");
 enum : unsigned { RE_VT_TRACE_SIZE = 8192 };
 struct RE_VTTrace
 {
  uint32 count;  // records written so far; the next goes to records[count % RE_VT_TRACE_SIZE]
  uint32 frame;  // Emulate() calls so far
+ uint32 loop;   // main-loop iterations started so far (RE_LOOP_PC)
+ uint32 synced; // the last iteration to reach its vblank wait (RE_SYNC_PC): its draws are all issued
  RE_VTRecord records[RE_VT_TRACE_SIZE];
 };
-static_assert(sizeof(RE_VTTrace) == (2 + RE_VT_TRACE_SIZE * 32) * sizeof(uint32), "RE_VTTrace must have no padding");
+static_assert(sizeof(RE_VTTrace) == (4 + RE_VT_TRACE_SIZE * 33) * sizeof(uint32), "RE_VTTrace must have no padding");
 RE_VTTrace RE_VT;
+
+// The game's logical frame: one iteration of its main loop, on the master,
+// 0x0600406E-0x060040EE (docs/vf2-sync.md). Each iteration runs the game
+// mode's handler, then the task runner 0x06004842 (which draws both
+// players), then waits for the vblank (the call at 0x060040C8); the emulator
+// ends each frame at a fixed point instead, so a late iteration's draws can
+// straddle two Emulate() calls, and an iteration can span several.
+// RE_VT.loop counts the iterations started (the loop head, RE_LOOP_PC), and
+// RE_VT.synced is the last iteration to reach its vblank wait (RE_SYNC_PC).
+enum : uint32 { RE_LOOP_PC = 0x0600406E, RE_SYNC_PC = 0x060040C8 };
 
 // What each vertex transform call draws, from the return addresses on the
 // stack at its entry (RE_VT_ENTRY_PC; see docs/vf2-scene-objects.md). Each
@@ -212,6 +226,7 @@ static RE_VTContext RE_VT_Classify(uint32 sp)
   RE_VTRecord& re_rec = RE_VT.records[RE_VT.count % RE_VT_TRACE_SIZE]; \
   const uint32 re_vertex = R[14] - 12;                                  \
   re_rec.frame = RE_VT.frame;                                           \
+  re_rec.loop = RE_VT.loop;                                             \
   re_rec.core = (this == &CPU[0]) ? 0 : 1;                              \
   re_rec.pr = PR;                                                       \
   re_rec.pdata = RE_ReadWorkRAM32(R[15]);                               \
@@ -236,6 +251,10 @@ static RE_VTContext RE_VT_Classify(uint32 sp)
  }                                                                      \
  if(MDFN_UNLIKELY(PC_ID == RE_VT_ENTRY_PC))                             \
   RE_VT_Ctx[this != &CPU[0]] = RE_VT_Classify(R[15]);                   \
+ if(MDFN_UNLIKELY(PC_ID == RE_LOOP_PC) && this == &CPU[0])              \
+  RE_VT.loop++;                                                         \
+ if(MDFN_UNLIKELY(PC_ID == RE_SYNC_PC) && this == &CPU[0])              \
+  RE_VT.synced = RE_VT.loop;                                            \
  if(MDFN_UNLIKELY(PC_ID == RE_PT.pc))                                   \
  {                                                                      \
   RE_PTRecord& re_pt = RE_PT.records[RE_PT.count++ % RE_PT_TRACE_SIZE]; \

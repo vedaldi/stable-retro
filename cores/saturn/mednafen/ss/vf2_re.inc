@@ -101,7 +101,7 @@ enum : uint32
  RE_PART_NONE = 0,          // not inside a player's draw
  RE_PART_OTHER = 1,         // inside 0x06017B54, no known part
  RE_PART_BODY = 2,          // the body, drawn inline (returns 0x06017C12, 0x06017C1E)
- RE_PART_HAIR = 3,          // 0x06023D44 (returns 0x06017BCC)
+ RE_PART_DETAIL = 3,        // character-specific details (hair, clothing), 0x06023D44 (returns 0x06017BCC)
  RE_PART_SHADOW = 4,        // ground shadows, 0x06017E54 (returns 0x06017BC0)
  RE_PART_STAGE_EFFECT = 5,  // 0x0602C8F4, e.g. the leaves (returns 0x0602C820); player 1's pass only
  RE_PART_PLAYER_EFFECT = 6, // 0x0602C832, per player (returns 0x0602C7C8); player 1's pass only
@@ -199,7 +199,7 @@ static RE_VTContext RE_VT_Classify(uint32 sp)
    case 0x06017AE8: ctx.player = 1; break;
    case 0x06017B44: ctx.player = 2; break;
    case 0x06017C12: case 0x06017C1E: part = RE_PART_BODY; break;
-   case 0x06017BCC: part = RE_PART_HAIR; break;
+   case 0x06017BCC: part = RE_PART_DETAIL; break;
    case 0x06017BC0: part = RE_PART_SHADOW; break;
    case 0x0602C820: part = RE_PART_STAGE_EFFECT; break;
    case 0x0602C7C8: part = RE_PART_PLAYER_EFFECT; break;
